@@ -23,7 +23,7 @@
 </head>
 <body>
 
-<h2>Web TimeLapse & Screen Recorder (Full Version)</h2>
+<h2>Web TimeLapse & Screen Recorder (Chromebook Optimized)</h2>
 
 <div class="container">
     <div class="panel">
@@ -57,8 +57,12 @@
 
 <div class="panel controls">
     <div>
-        Interval (sec): <input type="number" id="interval" value="30"><br><br>
-        FPS (Timelapse): <input type="number" id="fps" value="10">
+        Timelapse Speed:
+        <select id="fpsSelect">
+            <option value="1" selected>1fps (超高速: 30倍速相当)</option>
+            <option value="5">5fps (高速: 6倍速相当)</option>
+            <option value="10">10fps (中速: 3倍速相当)</option>
+        </select>
     </div>
     <div>
         <span id="statusLabel" class="status">Status: Idle</span><br><br>
@@ -66,32 +70,64 @@
     </div>
     <div style="display: flex; flex-direction: column; gap: 5px;">
         <button onclick="captureSnapshot()">Capture</button>
-        <button id="startBtn" onclick="startRecording()" style="background: #e1f5fe;">Rec Start (Camera & Screen)</button>
+        <button id="startBtn" onclick="startRecording()" style="background: #e1f5fe;">Rec Start</button>
         <button id="stopBtn" onclick="stopRecording()" disabled style="background: #ffebee;">Rec Stop</button>
     </div>
 </div>
 
 <script>
-    let isRecording = false;
-    let startTime, timerId;
-    let elapsedBefore = 0;
-    let cameraRecorder, screenRecorder;
-    let cameraChunks = [], screenChunks = [];
+let isRecording = false;
+let startTime, timerId;
+let elapsedBefore = 0;
+let cameraRecorder, screenRecorder;
+let cameraChunks = [], screenChunks = [];
 
-    const videoElement = document.getElementById('inputVideo');
-    const cameraCanvas = document.getElementById('cameraCanvas');
-    const faceCanvas = document.getElementById('faceCanvas');
-    const camCtx = cameraCanvas.getContext('2d');
-    const faceCtx = faceCanvas.getContext('2d');
+const videoElement = document.getElementById('inputVideo');
+const cameraCanvas = document.getElementById('cameraCanvas');
+const faceCanvas = document.getElementById('faceCanvas');
+const camCtx = cameraCanvas.getContext('2d');
+const faceCtx = faceCanvas.getContext('2d');
 
-    // --- Face Detection 設定 ---
-    const faceDetection = new FaceDetection({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
-    });
-    faceDetection.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
-    faceDetection.onResults(onFaceResults);
+// 画面キャプチャ用
+let screenVideo = document.createElement("video");
+screenVideo.muted = true;
+screenVideo.playsInline = true;
+let screenCanvas = document.createElement("canvas");
+screenCanvas.width = 1280;
+screenCanvas.height = 720;
+let screenCtx = screenCanvas.getContext("2d");
 
-    async function setupCamera() {
+const faceDetection = new FaceDetection({
+    locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
+});
+faceDetection.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
+
+let lastCaptureTime = 0;
+let lastScreenCapture = 0;
+
+// ★ タイムスタンプ生成関数
+function getTimestampString() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())} `
+         + `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+// ★ 起動時に音声最大化
+let originalVolume = 1.0;
+window.addEventListener("load", () => {
+    originalVolume = 1.0;
+});
+
+// ★ 終了時に音声停止
+window.addEventListener("beforeunload", () => {
+    speechSynthesis.cancel();
+});
+
+faceDetection.onResults(onFaceResults);
+
+async function setupCamera() {
+    try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true });
         videoElement.srcObject = stream;
         const camera = new Camera(videoElement, {
@@ -99,164 +135,215 @@
             width: 640, height: 480
         });
         camera.start();
+    } catch (e) {
+        alert("カメラの起動に失敗しました。権限を確認してください。");
     }
+}
 
-    // --- 描画ロジック：ここを修正しました ---
-    function onFaceResults(results) {
-        // 1. Camera View (録画用キャンバス)
-        camCtx.save();
-        camCtx.clearRect(0, 0, cameraCanvas.width, cameraCanvas.height);
+// ★ カメラ画像だけ間引き、赤枠・緑枠・タイムスタンプは毎フレーム描画
+function onFaceResults(results) {
+    const now = performance.now();
+    const interval = 1000 / parseInt(document.getElementById('fpsSelect').value);
+
+    if (now - lastCaptureTime >= interval) {
         camCtx.drawImage(results.image, 0, 0, cameraCanvas.width, cameraCanvas.height);
-        if (isRecording) {
-            camCtx.strokeStyle = "red";
-            camCtx.lineWidth = 10;
-            camCtx.strokeRect(0, 0, cameraCanvas.width, cameraCanvas.height);
-        }
-        camCtx.restore();
-
-        // 2. Processed View (顔認識キャンバス)
-        faceCtx.save();
-        faceCtx.clearRect(0, 0, faceCanvas.width, faceCanvas.height);
-        faceCtx.drawImage(results.image, 0, 0, faceCanvas.width, faceCanvas.height);
-        if (results.detections) {
-            for (const det of results.detections) {
-                const b = det.boundingBox;
-                // 修正ポイント：drawRectangleを使わず、strokeRectで枠線のみ描画
-                faceCtx.strokeStyle = "#00FF00";
-                faceCtx.lineWidth = 3;
-                faceCtx.strokeRect(
-                    b.xCenter * faceCanvas.width - (b.width * faceCanvas.width / 2),
-                    b.yCenter * faceCanvas.height - (b.height * faceCanvas.height / 2),
-                    b.width * faceCanvas.width,
-                    b.height * faceCanvas.height
-                );
-            }
-        }
-        faceCtx.restore();
+        lastCaptureTime = now;
     }
 
-    // --- 録画処理 ---
-    async function startRecording() {
-        if (isRecording) return;
-
-        let screenStream;
-        try {
-            screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
-        } catch (err) {
-            alert("画面共有がキャンセルされました");
-            return;
-        }
-
-        isRecording = true;
-        startTime = Date.now();
-        
-        document.getElementById('startBtn').disabled = true;
-        document.getElementById('stopBtn').disabled = false;
-        document.getElementById('recLabel').style.display = 'inline';
-        document.getElementById('statusLabel').innerText = "Status: Recording";
-
-        // タイムラプス対応：Canvasからストリームを取得
-        const fps = document.getElementById('fps').value || 10;
-        const camStream = cameraCanvas.captureStream(fps); 
-
-        cameraRecorder = new MediaRecorder(camStream, { mimeType: 'video/webm;codecs=vp9' });
-        screenRecorder = new MediaRecorder(screenStream, { mimeType: 'video/webm;codecs=vp9' });
-        
-        cameraChunks = []; screenChunks = [];
-        cameraRecorder.ondataavailable = e => cameraChunks.push(e.data);
-        screenRecorder.ondataavailable = e => screenChunks.push(e.data);
-
-        cameraRecorder.start();
-        screenRecorder.start();
-
-        timerId = setInterval(updateTimer, 1000);
+    // 赤枠
+    if (isRecording) {
+        camCtx.strokeStyle = "red";
+        camCtx.lineWidth = 10;
+        camCtx.strokeRect(0, 0, cameraCanvas.width, cameraCanvas.height);
     }
 
-    function updateTimer() {
-        const elapsed = Math.floor((Date.now() - startTime) / 1000);
-        const limitOn = document.getElementById('limitOn').checked;
-        const currentTotal = timeToSec(document.getElementById('totalTimeInput').value);
-        const remaining = Math.max(0, currentTotal - (elapsed + elapsedBefore));
-        
-        document.getElementById('remainDisplay').innerText = secToTime(remaining);
+    // ★ タイムスタンプ（赤字）
+    camCtx.fillStyle = "red";
+    camCtx.font = "20px Meiryo";
+    camCtx.textAlign = "right";
+    camCtx.fillText(getTimestampString(), cameraCanvas.width - 10, 25);
 
+    // 顔検出
+    faceCtx.drawImage(results.image, 0, 0, faceCanvas.width, faceCanvas.height);
+    if (results.detections) {
+        for (const det of results.detections) {
+            const b = det.boundingBox;
+            faceCtx.strokeStyle = "#00FF00";
+            faceCtx.lineWidth = 3;
+            faceCtx.strokeRect(
+                b.xCenter * faceCanvas.width - (b.width * faceCanvas.width / 2),
+                b.yCenter * faceCanvas.height - (b.height * faceCanvas.height / 2),
+                b.width * faceCanvas.width,
+                b.height * faceCanvas.height
+            );
+        }
+    }
+}
+
+function speak(text) {
+    window.speechSynthesis.cancel();
+    const uttr = new SpeechSynthesisUtterance(text);
+    uttr.lang = 'ja-JP';
+    uttr.volume = 1.0;
+    window.speechSynthesis.speak(uttr);
+}
+
+async function startRecording() {
+    if (isRecording) return;
+
+    speak("");
+
+    let screenStream;
+    try {
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    } catch (err) {
+        return;
+    }
+
+    screenVideo.srcObject = screenStream;
+    screenVideo.play();
+
+    const fps = parseInt(document.getElementById('fpsSelect').value);
+
+    setInterval(() => {
+        const now = performance.now();
+        const interval = 1000 / fps;
+        if (now - lastScreenCapture >= interval) {
+            screenCtx.drawImage(screenVideo, 0, 0, screenCanvas.width, screenCanvas.height);
+
+            // ★ 画面キャプチャにも赤字タイムスタンプ
+            screenCtx.fillStyle = "red";
+            screenCtx.font = "24px Meiryo";
+            screenCtx.textAlign = "right";
+            screenCtx.fillText(getTimestampString(), screenCanvas.width - 10, 30);
+
+            lastScreenCapture = now;
+        }
+    }, 10);
+
+    isRecording = true;
+    startTime = Date.now();
+
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('stopBtn').disabled = false;
+    document.getElementById('recLabel').style.display = 'inline';
+    document.getElementById('statusLabel').innerText = "Status: Recording";
+
+    const camStream = cameraCanvas.captureStream(fps);
+    const scrStream = screenCanvas.captureStream(fps);
+
+    const options = { mimeType: 'video/webm;codecs=vp8' };
+    cameraRecorder = new MediaRecorder(camStream, options);
+    screenRecorder = new MediaRecorder(scrStream, options);
+
+    cameraChunks = []; screenChunks = [];
+    cameraRecorder.ondataavailable = e => { if(e.data.size > 0) cameraChunks.push(e.data); };
+    screenRecorder.ondataavailable = e => { if(e.data.size > 0) screenChunks.push(e.data); };
+
+    cameraRecorder.start(100);
+    screenRecorder.start(100);
+
+    timerId = setInterval(updateTimer, 1000);
+}
+
+function formatTimestamp() {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+function formatElapsed(sec) {
+    const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+    const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+    const s = String(sec % 60).padStart(2, '0');
+    return `${h}${m}${s}`;
+}
+
+function stopRecording() {
+    if (!isRecording) return;
+    isRecording = false;
+    clearInterval(timerId);
+
+    const ts = formatTimestamp();
+    const elapsed = formatElapsed(Math.floor((Date.now() - startTime) / 1000));
+
+    cameraRecorder.stop();
+    screenRecorder.stop();
+
+    cameraRecorder.onstop = () =>
+        saveBlob(cameraChunks, `${ts}_timelapse_(${elapsed}).mp4`);
+
+    screenRecorder.onstop = () =>
+        saveBlob(screenChunks, `${ts}_screen_no1_(${elapsed}).mp4`);
+
+    document.getElementById('startBtn').disabled = false;
+    document.getElementById('stopBtn').disabled = true;
+    document.getElementById('recLabel').style.display = 'none';
+    document.getElementById('statusLabel').innerText = "Status: Stopped";
+
+    elapsedBefore += Math.floor((Date.now() - startTime) / 1000);
+
+    // ★ 終了時に残り時間をリセット
+    document.getElementById('remainDisplay').innerText =
+        document.getElementById('totalTimeInput').value;
+}
+
+function saveBlob(chunks, filename) {
+    const blob = new Blob(chunks, { type: 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+}
+
+function updateTimer() {
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+    const limitOn = document.getElementById('limitOn').checked;
+    const currentTotal = timeToSec(document.getElementById('totalTimeInput').value);
+    const remaining = Math.max(0, currentTotal - (elapsed + elapsedBefore));
+
+    document.getElementById('remainDisplay').innerText = secToTime(remaining);
+
+    // ★ TimeControl:Off の時は音声なし
+    if (limitOn) {
         if ([600, 300, 10, 0].includes(remaining)) {
             const msg = remaining === 0 ? "終了です" : "残り" + (remaining >= 60 ? remaining/60 + "分" : remaining + "秒");
-            const uttr = new SpeechSynthesisUtterance(msg);
-            window.speechSynthesis.speak(uttr);
-        }
-
-        if (limitOn && remaining <= 0) stopRecording();
-    }
-
-    function stopRecording() {
-        if (!isRecording) return;
-        isRecording = false;
-        clearInterval(timerId);
-
-        cameraRecorder.stop();
-        screenRecorder.stop();
-
-        cameraRecorder.onstop = () => saveBlob(cameraChunks, `cam_timelapse_${Date.now()}.webm`);
-        screenRecorder.onstop = () => {
-            saveBlob(screenChunks, `screen_${Date.now()}.webm`);
-            // 画面共有を停止する
-            screenRecorder.stream.getTracks().forEach(track => track.stop());
-        };
-
-        document.getElementById('startBtn').disabled = false;
-        document.getElementById('stopBtn').disabled = true;
-        document.getElementById('recLabel').style.display = 'none';
-        document.getElementById('statusLabel').innerText = "Status: Stopped";
-        
-        elapsedBefore += Math.floor((Date.now() - startTime) / 1000);
-    }
-
-    // --- ユーティリティ ---
-    function saveBlob(chunks, filename) {
-        const blob = new Blob(chunks, { type: 'video/webm' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-    }
-
-    function timeToSec(str) {
-        const p = str.split(':');
-        return parseInt(p[0]) * 3600 + parseInt(p[1]) * 60 + parseInt(p[2]);
-    }
-
-    function secToTime(s) {
-        return new Date(s * 1000).toISOString().substr(11, 8);
-    }
-
-    function resetTimer() {
-        elapsedBefore = 0;
-        document.getElementById('remainDisplay').innerText = document.getElementById('totalTimeInput').value;
-    }
-
-    function togglePreview() {
-        const c = document.getElementById('cameraCanvas');
-        const btn = document.getElementById('previewBtn');
-        if (c.style.visibility === 'hidden') {
-            c.style.visibility = 'visible';
-            btn.innerText = "LiveView OFF";
-        } else {
-            c.style.visibility = 'hidden';
-            btn.innerText = "LiveView ON";
+            speak(msg);
         }
     }
 
-    function captureSnapshot() {
-        const a = document.createElement('a');
-        a.href = faceCanvas.toDataURL('image/jpeg');
-        a.download = `snapshot_${Date.now()}.jpg`;
-        a.click();
-    }
+    if (limitOn && remaining <= 0) stopRecording();
+}
 
-    setupCamera();
+function timeToSec(str) {
+    const p = str.split(':');
+    return parseInt(p[0]) * 3600 + parseInt(p[1]) * 60 + parseInt(p[2]);
+}
+
+function secToTime(s) {
+    return new Date(s * 1000).toISOString().substr(11, 8);
+}
+
+function resetTimer() {
+    elapsedBefore = 0;
+    document.getElementById('remainDisplay').innerText = document.getElementById('totalTimeInput').value;
+}
+
+function togglePreview() {
+    const c = document.getElementById('cameraCanvas');
+    c.style.visibility = (c.style.visibility === 'hidden') ? 'visible' : 'hidden';
+    document.getElementById('previewBtn').innerText = (c.style.visibility === 'hidden') ? "LiveView ON" : "LiveView OFF";
+}
+
+function captureSnapshot() {
+    const a = document.createElement('a');
+    a.href = faceCanvas.toDataURL('image/jpeg');
+    a.download = `snapshot_${Date.now()}.jpg`;
+    a.click();
+}
+
+setupCamera();
 </script>
-
 </body>
 </html>
