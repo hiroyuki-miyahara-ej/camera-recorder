@@ -3,42 +3,41 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Web TimeLapse Recorder</title>
+    <title>Web TimeLapse & Screen Recorder</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
     <style>
         body { font-family: 'Meiryo UI', sans-serif; background: #f0f0f0; margin: 20px; }
         .container { display: flex; gap: 20px; flex-wrap: wrap; }
         .panel { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
-        .video-box { position: relative; width: 480px; height: 360px; background: #000; }
-        video, canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        .video-box { position: relative; width: 480px; height: 360px; background: #000; overflow: hidden; }
+        video, canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; }
         .controls { margin-top: 20px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: 800px; }
         .status { font-weight: bold; color: #333; }
-        .rec-active { color: red; animation: blink 1s infinite; }
+        .rec-active { color: red; animation: blink 1s infinite; font-weight: bold; }
         @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0; } 100% { opacity: 1; } }
         .remaining-time { font-size: 24px; color: blue; font-weight: bold; }
-        button { padding: 10px; font-size: 16px; cursor: pointer; }
+        button { padding: 10px; font-size: 14px; cursor: pointer; border-radius: 4px; border: 1px solid #ccc; }
         input { width: 80px; padding: 5px; }
     </style>
 </head>
 <body>
 
-<h2>Web TimeLapse Recorder (Client-Side)</h2>
+<h2>Web TimeLapse & Screen Recorder (Full Version)</h2>
 
 <div class="container">
     <div class="panel">
         <h3>Camera View <span id="recLabel" class="rec-active" style="display:none;">● REC</span></h3>
         <div class="video-box">
-            <video id="inputVideo" autoplay playsinline muted></video>
-            <canvas id="cameraCanvas"></canvas>
+            <video id="inputVideo" autoplay playsinline muted style="display:none;"></video>
+            <canvas id="cameraCanvas" width="640" height="480"></canvas>
         </div>
     </div>
 
     <div class="panel">
         <h3>Processed View (Face Detection)</h3>
         <div class="video-box">
-            <canvas id="faceCanvas"></canvas>
+            <canvas id="faceCanvas" width="640" height="480"></canvas>
         </div>
     </div>
 
@@ -59,7 +58,7 @@
 <div class="panel controls">
     <div>
         Interval (sec): <input type="number" id="interval" value="30"><br><br>
-        Duration (sec): <input type="number" id="duration" value="7200">
+        FPS (Timelapse): <input type="number" id="fps" value="10">
     </div>
     <div>
         <span id="statusLabel" class="status">Status: Idle</span><br><br>
@@ -67,21 +66,15 @@
     </div>
     <div style="display: flex; flex-direction: column; gap: 5px;">
         <button onclick="captureSnapshot()">Capture</button>
-        <button id="startBtn" onclick="startRecording()" style="background: #e1f5fe;">Rec Start</button>
+        <button id="startBtn" onclick="startRecording()" style="background: #e1f5fe;">Rec Start (Camera & Screen)</button>
         <button id="stopBtn" onclick="stopRecording()" disabled style="background: #ffebee;">Rec Stop</button>
     </div>
 </div>
 
 <script>
-    // --- 定数・変数 ---
-    const ANNOUNCE_TARGETS = [600, 300, 10, 0]; // 10分, 5分, 10秒, 0秒
-    let announced = new Set();
     let isRecording = false;
-    let startTime, timerId, timelapseId;
-    let totalSeconds = 2700; // 45分
+    let startTime, timerId;
     let elapsedBefore = 0;
-    
-    // MediaRecorder関連
     let cameraRecorder, screenRecorder;
     let cameraChunks = [], screenChunks = [];
 
@@ -91,55 +84,61 @@
     const camCtx = cameraCanvas.getContext('2d');
     const faceCtx = faceCanvas.getContext('2d');
 
-    // --- 初期化: カメラとAIの設定 ---
+    // --- Face Detection 設定 ---
     const faceDetection = new FaceDetection({
         locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
     });
-
     faceDetection.setOptions({ model: 'short', minDetectionConfidence: 0.5 });
     faceDetection.onResults(onFaceResults);
 
     async function setupCamera() {
         const stream = await navigator.mediaDevices.getUserMedia({ video: true });
         videoElement.srcObject = stream;
-        
-        // MediaPipeによるフレーム処理開始
         const camera = new Camera(videoElement, {
-            onFrame: async () => {
-                await faceDetection.send({image: videoElement});
-            },
+            onFrame: async () => { await faceDetection.send({image: videoElement}); },
             width: 640, height: 480
         });
         camera.start();
     }
 
-    // --- 顔認識の結果描画 ---
+    // --- 描画ロジック：ここを修正しました ---
     function onFaceResults(results) {
-        // メインキャンバスの描画（赤枠など）
+        // 1. Camera View (録画用キャンバス)
+        camCtx.save();
         camCtx.clearRect(0, 0, cameraCanvas.width, cameraCanvas.height);
+        camCtx.drawImage(results.image, 0, 0, cameraCanvas.width, cameraCanvas.height);
         if (isRecording) {
             camCtx.strokeStyle = "red";
             camCtx.lineWidth = 10;
             camCtx.strokeRect(0, 0, cameraCanvas.width, cameraCanvas.height);
         }
+        camCtx.restore();
 
-        // Processed View への描画
+        // 2. Processed View (顔認識キャンバス)
         faceCtx.save();
         faceCtx.clearRect(0, 0, faceCanvas.width, faceCanvas.height);
         faceCtx.drawImage(results.image, 0, 0, faceCanvas.width, faceCanvas.height);
         if (results.detections) {
-            for (const detection of results.detections) {
-                drawRectangle(faceCtx, detection.boundingBox, {color: '#00FF00', lineWidth: 2});
+            for (const det of results.detections) {
+                const b = det.boundingBox;
+                // 修正ポイント：drawRectangleを使わず、strokeRectで枠線のみ描画
+                faceCtx.strokeStyle = "#00FF00";
+                faceCtx.lineWidth = 3;
+                faceCtx.strokeRect(
+                    b.xCenter * faceCanvas.width - (b.width * faceCanvas.width / 2),
+                    b.yCenter * faceCanvas.height - (b.height * faceCanvas.height / 2),
+                    b.width * faceCanvas.width,
+                    b.height * faceCanvas.height
+                );
             }
         }
         faceCtx.restore();
     }
 
-    // --- 録画・タイマー処理 ---
+    // --- 録画処理 ---
     async function startRecording() {
         if (isRecording) return;
 
-        // 画面キャプチャの取得（ブラウザのダイアログが出る）
         let screenStream;
         try {
             screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
@@ -149,19 +148,19 @@
         }
 
         isRecording = true;
-        announced.clear();
         startTime = Date.now();
         
-        // UI更新
         document.getElementById('startBtn').disabled = true;
         document.getElementById('stopBtn').disabled = false;
         document.getElementById('recLabel').style.display = 'inline';
         document.getElementById('statusLabel').innerText = "Status: Recording";
 
-        // 録画設定 (MediaRecorder)
-        const camStream = videoElement.srcObject;
-        cameraRecorder = new MediaRecorder(camStream);
-        screenRecorder = new MediaRecorder(screenStream);
+        // タイムラプス対応：Canvasからストリームを取得
+        const fps = document.getElementById('fps').value || 10;
+        const camStream = cameraCanvas.captureStream(fps); 
+
+        cameraRecorder = new MediaRecorder(camStream, { mimeType: 'video/webm;codecs=vp9' });
+        screenRecorder = new MediaRecorder(screenStream, { mimeType: 'video/webm;codecs=vp9' });
         
         cameraChunks = []; screenChunks = [];
         cameraRecorder.ondataavailable = e => cameraChunks.push(e.data);
@@ -170,33 +169,24 @@
         cameraRecorder.start();
         screenRecorder.start();
 
-        // タイムタイマー開始
-        timerId = setInterval(updateTimer, 500);
-        
-        // タイムラプス保存用（擬似）
-        // 実際にはWebMとしてストリーム保存されますが、
-        // インターバルごとに何か処理をする場合はここに記述します。
+        timerId = setInterval(updateTimer, 1000);
     }
 
     function updateTimer() {
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
         const limitOn = document.getElementById('limitOn').checked;
-        
         const currentTotal = timeToSec(document.getElementById('totalTimeInput').value);
         const remaining = Math.max(0, currentTotal - (elapsed + elapsedBefore));
         
         document.getElementById('remainDisplay').innerText = secToTime(remaining);
 
-        // 音声アナウンス
-        if (ANNOUNCE_TARGETS.includes(remaining) && !announced.has(remaining)) {
-            speak(`残り${remaining === 0 ? '終了' : (remaining >= 60 ? remaining/60 + '分' : remaining + '秒')}です`);
-            announced.add(remaining);
+        if ([600, 300, 10, 0].includes(remaining)) {
+            const msg = remaining === 0 ? "終了です" : "残り" + (remaining >= 60 ? remaining/60 + "分" : remaining + "秒");
+            const uttr = new SpeechSynthesisUtterance(msg);
+            window.speechSynthesis.speak(uttr);
         }
 
-        // 0秒で停止
-        if (limitOn && remaining <= 0) {
-            stopRecording();
-        }
+        if (limitOn && remaining <= 0) stopRecording();
     }
 
     function stopRecording() {
@@ -207,10 +197,13 @@
         cameraRecorder.stop();
         screenRecorder.stop();
 
-        cameraRecorder.onstop = () => saveBlob(cameraChunks, `timelapse_${getTimestamp()}.webm`);
-        screenRecorder.onstop = () => saveBlob(screenChunks, `screen_${getTimestamp()}.webm`);
+        cameraRecorder.onstop = () => saveBlob(cameraChunks, `cam_timelapse_${Date.now()}.webm`);
+        screenRecorder.onstop = () => {
+            saveBlob(screenChunks, `screen_${Date.now()}.webm`);
+            // 画面共有を停止する
+            screenRecorder.stream.getTracks().forEach(track => track.stop());
+        };
 
-        // UIリセット
         document.getElementById('startBtn').disabled = false;
         document.getElementById('stopBtn').disabled = true;
         document.getElementById('recLabel').style.display = 'none';
@@ -229,12 +222,6 @@
         a.click();
     }
 
-    function speak(text) {
-        const uttr = new SpeechSynthesisUtterance(text);
-        uttr.lang = 'ja-JP';
-        window.speechSynthesis.speak(uttr);
-    }
-
     function timeToSec(str) {
         const p = str.split(':');
         return parseInt(p[0]) * 3600 + parseInt(p[1]) * 60 + parseInt(p[2]);
@@ -244,35 +231,30 @@
         return new Date(s * 1000).toISOString().substr(11, 8);
     }
 
-    function getTimestamp() {
-        return new Date().toISOString().replace(/[:.-]/g, "").substr(0, 14);
-    }
-
     function resetTimer() {
         elapsedBefore = 0;
         document.getElementById('remainDisplay').innerText = document.getElementById('totalTimeInput').value;
     }
 
     function togglePreview() {
-        const v = document.getElementById('inputVideo');
+        const c = document.getElementById('cameraCanvas');
         const btn = document.getElementById('previewBtn');
-        if (v.style.visibility === 'hidden') {
-            v.style.visibility = 'visible';
+        if (c.style.visibility === 'hidden') {
+            c.style.visibility = 'visible';
             btn.innerText = "LiveView OFF";
         } else {
-            v.style.visibility = 'hidden';
+            c.style.visibility = 'hidden';
             btn.innerText = "LiveView ON";
         }
     }
 
     function captureSnapshot() {
-        const link = document.createElement('a');
-        link.download = `snapshot_${getTimestamp()}.jpg`;
-        link.href = faceCanvas.toDataURL('image/jpeg');
-        link.click();
+        const a = document.createElement('a');
+        a.href = faceCanvas.toDataURL('image/jpeg');
+        a.download = `snapshot_${Date.now()}.jpg`;
+        a.click();
     }
 
-    // 起動
     setupCamera();
 </script>
 
